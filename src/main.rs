@@ -1,8 +1,9 @@
+use futures::StreamExt;
 use tokio::net::TcpListener;
-use tokio::io::AsyncReadExt;
+use tokio_tungstenite::accept_async;
 
 #[tokio::main]
-async fn main() -> std::io::Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut ip = String::new();
 
     println!("Host on: ");
@@ -11,22 +12,19 @@ async fn main() -> std::io::Result<()> {
     let listener = TcpListener::bind(&ip.trim()).await?;
     println!("Yapping server is now running!");
 
-    loop {
-        let (mut socket, _) = listener.accept().await?;
-        println!("Accepted connection!");
-
+    while let Ok((stream, _)) = listener.accept().await {
         tokio::spawn(async move {
-            let mut buf = [0; 1024];
+            let ws_stream = accept_async(stream).await.expect("Error during WebSocket handshake");
+            println!("Accetped connection!");
 
-            match socket.read(&mut buf).await {
-                Ok(n) if n == 0 => return, 
-                Ok(n) => {
-                    println!("Received: {}", String::from_utf8_lossy(&buf[..n]));
-                }
-                Err(e) => {
-                    eprintln!("Failed to read from socket: {:?}", e);
-                }
+            let (_, mut read) = ws_stream.split();
+
+            while let Some(Ok(msg)) = read.next().await {
+                let received = msg.to_text().unwrap();
+                println!("Received: {}", received);
             }
         });
     }
+    
+    Ok(())
 }
