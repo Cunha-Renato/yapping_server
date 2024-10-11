@@ -4,9 +4,13 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+serde = "=1.0.210"
 tokio = {version = "1.40.0", features = ["full"]}
 futures = "0.3"
 tokio-tungstenite = "0.24.0"
+mongodb = "3.1.0"
+
+yapping_core = { path = "../yapping_core" }
 
 [profile.release]
 lto = true

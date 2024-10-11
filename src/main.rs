@@ -1,30 +1,15 @@
-use futures::StreamExt;
-use tokio::net::TcpListener;
-use tokio_tungstenite::accept_async;
+mod web_socket;
+mod mongo_db;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut ip = String::new();
-
-    println!("Host on: ");
-    std::io::stdin().read_line(&mut ip).unwrap();
-
-    let listener = TcpListener::bind(&ip.trim()).await?;
-    println!("Yapping server is now running!");
-
-    while let Ok((stream, _)) = listener.accept().await {
-        tokio::spawn(async move {
-            let ws_stream = accept_async(stream).await.expect("Error during WebSocket handshake");
-            println!("Accetped connection!");
-
-            let (_, mut read) = ws_stream.split();
-
-            while let Some(Ok(msg)) = read.next().await {
-                let received = msg.to_text().unwrap();
-                println!("Received: {}", received);
-            }
-        });
+    if cfg!(debug_assertions) {
+        std::env::set_var("LOG", "4");
     }
+    let mongo_db = mongo_db::MongoDB::new().await?;
+    mongo_db.new_user().await;
+
+    web_socket::run().await?;
     
     Ok(())
 }
