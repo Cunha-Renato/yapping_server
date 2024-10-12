@@ -1,25 +1,17 @@
 use std::process::ExitStatus;
-use serde::{Deserialize, Serialize};
-use yapping_core::l3gion_rust::{sllog::warn, StdError, UUID};
+use mongodb::bson::doc;
+use yapping_core::{l3gion_rust::{sllog::warn, StdError, UUID}, user::{DbUser, User, UserCreationInfo}};
 
 const MONGO_PATH: &str = "mongoDB/core/bin/mongod.exe";
 const MONGO_DATA: &str = "mongoDB/data";
 const MONGO_LOG: &str = "mongoDB/log";
-
-#[derive(Serialize, Deserialize)]
-pub(crate) struct User {
-    _id: String,
-    user_tag: String,
-    email: String,
-    password: String,
-    user_pic: String,
-}
 
 pub(crate) struct MongoDB {
     _db_thread: std::thread::JoinHandle<std::io::Result<ExitStatus>>,
     mongo_client: mongodb::Client,
     mongo_database: mongodb::Database,
 }
+// Public(crate)
 impl MongoDB {
     pub(crate) async fn new() -> Result<Self, StdError> {
         // MongoDB setup
@@ -51,19 +43,40 @@ impl MongoDB {
             mongo_database,
         })
     }
-    
-    pub(crate) async fn new_user(&self) {
-        let user = User {
-            _id: UUID::generate().to_string(),
-            user_tag: "L3gion".to_string(),
-            email: "legion@gmail.com".to_string(),
-            password: UUID::generate().to_string(),
-            user_pic: UUID::generate().to_string(),
-        };
+
+    pub(crate) async fn login(&self, info: UserCreationInfo) -> Result<User, StdError> {
+        let db_user = self.get_user(doc! { 
+            "email": info.email.clone(),
+            "password": info.password.to_string(),
+        }).await?;
+
+        Ok(User::from(db_user)?)
+    }
+
+    pub(crate) async fn sign_up(&self, info: UserCreationInfo) -> Result<User, StdError> {
+        if self.get_user(doc! { "email": info.email.clone() }).await.is_ok() {
+            return Err("User already exist!".into());
+        }
+        else if info.tag.is_empty() || info.email.is_empty() || !info.password.is_valid() {
+            return Err("Please fill all the fields!".into());
+        }
         
-        let users = self.mongo_database.collection::<User>("Users");
+        let db_user = DbUser::new(info);
+        let users = self.user_collection();
         
-        let result = users.insert_one(user).await.unwrap();
-        warn!("{:?}", result);
+        users.insert_one(db_user.clone()).await?;
+
+        Ok(User::from(db_user)?)
+    }
+
+    pub(crate) async fn get_user(&self, document: mongodb::bson::Document) -> Result<DbUser, StdError> {
+        let users = self.user_collection();
+        users.find_one(document).await?.ok_or("Failed to find User!".into())
+    }
+}
+// Private
+impl MongoDB {
+    fn user_collection(&self) -> mongodb::Collection<DbUser> {
+        self.mongo_database.collection::<DbUser>("Users")
     }
 }
