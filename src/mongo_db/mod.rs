@@ -2,7 +2,6 @@ use std::process::ExitStatus;
 use mongodb::bson::doc;
 use yapping_core::{l3gion_rust::{sllog::warn, StdError, UUID}, user::{DbUser, User, UserCreationInfo}};
 
-const MONGO_PATH: &str = "mongoDB/core/bin/mongod.exe";
 const MONGO_DATA: &str = "mongoDB/data";
 const MONGO_LOG: &str = "mongoDB/log";
 
@@ -18,13 +17,14 @@ impl MongoDB {
         std::fs::create_dir_all(MONGO_DATA).map_err(|_| "Failed to create mongodb data dir!")?;
         
         let _db_thread = std::thread::spawn(move || {
-           let mut child = std::process::Command::new(MONGO_PATH)
-            .arg("--dbpath")
-            .arg(MONGO_DATA)
-            .arg("--logpath")
-            .arg(MONGO_LOG)
-            .spawn()
-            .expect("Failed to run mongod command!");
+           let mut child = std::process::Command::new("cmd")
+                .arg("mongod")
+                .arg("--dbpath")
+                .arg(MONGO_DATA)
+                .arg("--logpath")
+                .arg(MONGO_LOG)
+                .spawn()
+                .expect("Failed to run mongod command!");
         
             child.wait()
         });
