@@ -3,7 +3,7 @@ use std::sync::Arc;
 use futures::{SinkExt, StreamExt};
 use tokio::{net::TcpListener, sync::Mutex};
 use tokio_tungstenite::accept_async;
-use yapping_core::{l3gion_rust::{sllog::{error, info, warn}, StdError}, server_message::{ClientMessage, ServerMessage, SuccessType}};
+use yapping_core::{l3gion_rust::{sllog::{error, info, warn}, StdError, UUID}, server_message::{ClientMessage, ClientMessageContent, ServerMessage, ServerMessageContent, SuccessType}};
 use crate::mongo_db::MongoDB;
 
 use tokio_tungstenite::tungstenite::Message as TkMessage;
@@ -17,12 +17,7 @@ impl ServerManager {
     }
 
     pub(crate) async fn run(&self) -> Result<(), StdError> {
-        let mut ip = String::new();
-    
-        println!("Host on: ");
-        std::io::stdin().read_line(&mut ip).unwrap();
-    
-        let listener = TcpListener::bind(&ip.trim()).await?;
+        let listener = TcpListener::bind("0.0.0.0:8080").await?;
         info!("Yapping server is now running!");
     
         while let Ok((stream, _)) = listener.accept().await {
@@ -65,20 +60,28 @@ impl ServerManager {
     async fn handle_message(mongo_db: Arc<Mutex<MongoDB>>, message: ClientMessage) -> ServerMessage {
         let mongo_db = mongo_db.lock().await;
 
-        match match message {
-            ClientMessage::LOGIN(info) => mongo_db.login(info).await.map(|user| ServerMessage::SUCCESS(SuccessType::LOGIN(user))),
-            ClientMessage::SIGN_UP(info) => mongo_db.sign_up(info).await.map(|user| ServerMessage::SUCCESS(SuccessType::SIGN_UP(user))),
-            ClientMessage::NEW_CHAT(_) => todo!(),
-            ClientMessage::MESSAGE_SEND(_, _) => todo!(),
-            ClientMessage::UPDATE_USER_TAG(_, _) => todo!(),
-            ClientMessage::UPDATE_USER_EMAIL(_, _) => todo!(),
-            ClientMessage::UPDATE_USER_PIC(_, _) => todo!(),
-            ClientMessage::UPDATE_USER_PASSWORD(_, _) => todo!(),
-            ClientMessage::DELETE_USER(_) => todo!(),
-            ClientMessage::FRIEND_REQUEST(_, _) => todo!(),
+        match match message.content {
+            ClientMessageContent::LOGIN(info) => mongo_db
+                .login(info)
+                .await
+                .map(|user| ServerMessage::new(message.uuid, ServerMessageContent::SUCCESS(SuccessType::LOGIN(user)))),
+
+            ClientMessageContent::SIGN_UP(info) => mongo_db
+                .sign_up(info)
+                .await
+                .map(|user| ServerMessage::new(message.uuid, ServerMessageContent::SUCCESS(SuccessType::SIGN_UP(user)))),
+
+            ClientMessageContent::NEW_CHAT(_) => todo!(),
+            ClientMessageContent::MESSAGE_SEND(_, _) => todo!(),
+            ClientMessageContent::UPDATE_USER_TAG(_, _) => todo!(),
+            ClientMessageContent::UPDATE_USER_EMAIL(_, _) => todo!(),
+            ClientMessageContent::UPDATE_USER_PIC(_, _) => todo!(),
+            ClientMessageContent::UPDATE_USER_PASSWORD(_, _) => todo!(),
+            ClientMessageContent::DELETE_USER(_) => todo!(),
+            ClientMessageContent::FRIEND_REQUEST(_, _) => todo!(),
         } {
             Ok(sm) => sm,
-            Err(e) => ServerMessage::FAIL(e.to_string()),
+            Err(e) => ServerMessage::new(message.uuid, ServerMessageContent::FAIL(e.to_string())),
         }
     }
 }

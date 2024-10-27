@@ -1,46 +1,49 @@
 use std::process::ExitStatus;
 use mongodb::bson::doc;
 use yapping_core::{l3gion_rust::{sllog::warn, StdError, UUID}, user::{DbUser, User, UserCreationInfo}};
+use mongodb::{Client, Database};
+use std::io::Error as IoError;
+use std::process::Command;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use tokio::task;
 
-const MONGO_DATA: &str = "mongoDB/data";
-const MONGO_LOG: &str = "mongoDB/log";
+const MONGO_DATA: &str = "mongo_db/data";
+const MONGO_LOG: &str = "mongo_db/log";
 
 pub(crate) struct MongoDB {
-    _db_thread: std::thread::JoinHandle<std::io::Result<ExitStatus>>,
-    mongo_client: mongodb::Client,
-    mongo_database: mongodb::Database,
+    _db_thread: tokio::task::JoinHandle<Result<ExitStatus, IoError>>,
+    mongo_client: Arc<Mutex<Client>>,
+    mongo_database: Arc<Database>,
 }
-// Public(crate)
+
 impl MongoDB {
     pub(crate) async fn new() -> Result<Self, StdError> {
-        // MongoDB setup
-        std::fs::create_dir_all(MONGO_DATA).map_err(|_| "Failed to create mongodb data dir!")?;
-        
-        let _db_thread = std::thread::spawn(move || {
-           let mut child = std::process::Command::new("cmd")
-                .arg("mongod")
+        std::fs::create_dir_all(MONGO_DATA).map_err(|_| "Failed to create MongoDB data directory!")?;
+
+        let _db_thread = task::spawn_blocking(move || {
+            Command::new("mongod")
                 .arg("--dbpath")
                 .arg(MONGO_DATA)
                 .arg("--logpath")
                 .arg(MONGO_LOG)
                 .spawn()
-                .expect("Failed to run mongod command!");
-        
-            child.wait()
+                .and_then(|mut child| child.wait())
         });
 
-        // Client initialization.
-        // TODO: Make this better.
-        let client_op = mongodb::options::ClientOptions::parse("mongodb://localhost:27017/?directConnection=true").await?;
-        let mongo_client = mongodb::Client::with_options(client_op)?;
-
-        // Connecting to database.
+        let client_options = mongodb::options::ClientOptions::parse("mongodb://localhost:27017/?directConnection=true")
+            .await
+            .map_err(|e| format!("Failed to parse client options: {}", e))?;
+        
+        let mongo_client = Client::with_options(client_options)
+            .map_err(|e| format!("Failed to create MongoDB client: {}", e))?;
+        
         let mongo_database = mongo_client.database("yapping_db");
 
         Ok(Self {
             _db_thread,
-            mongo_client,
-            mongo_database,
+            mongo_client: Arc::new(Mutex::new(mongo_client)),
+            mongo_database: Arc::new(mongo_database),
         })
     }
 
