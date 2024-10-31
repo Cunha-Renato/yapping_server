@@ -1,6 +1,6 @@
 use std::process::ExitStatus;
 use mongodb::bson::doc;
-use yapping_core::{l3gion_rust::{sllog::warn, StdError, UUID}, user::{DbUser, User, UserCreationInfo}};
+use yapping_core::{l3gion_rust::StdError, user::{DbUser, User, UserCreationInfo}};
 use mongodb::{Client, Database};
 use std::io::Error as IoError;
 use std::process::Command;
@@ -16,7 +16,6 @@ pub(crate) struct MongoDB {
     mongo_client: Arc<Mutex<Client>>,
     mongo_database: Arc<Database>,
 }
-
 impl MongoDB {
     pub(crate) async fn new() -> Result<Self, StdError> {
         std::fs::create_dir_all(MONGO_DATA).map_err(|_| "Failed to create MongoDB data directory!")?;
@@ -53,7 +52,17 @@ impl MongoDB {
             "password": info.password.to_string(),
         }).await?;
 
-        Ok(User::from(db_user)?)
+        let mut friends = Vec::with_capacity(db_user.friends().len());
+        for friend_uuid in db_user.friends() {
+            friends.push(User::from(self.get_user(doc! {
+                "_id": friend_uuid
+            }).await?)?);
+        }
+
+        let mut user = User::from(db_user)?;
+        user.set_friends(friends);
+
+        Ok(user)
     }
 
     pub(crate) async fn sign_up(&self, info: UserCreationInfo) -> Result<User, StdError> {
