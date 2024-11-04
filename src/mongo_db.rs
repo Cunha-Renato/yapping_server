@@ -1,6 +1,7 @@
 use std::process::ExitStatus;
 use mongodb::bson::doc;
-use yapping_core::{l3gion_rust::StdError, user::{DbUser, User, UserCreationInfo}};
+use yapping_core::{l3gion_rust::{StdError, UUID}, user::{DbUser, User, UserCreationInfo}};
+use futures::StreamExt;
 use mongodb::{Client, Database};
 use std::io::Error as IoError;
 use std::process::Command;
@@ -48,14 +49,14 @@ impl MongoDBClient {
 pub(crate) struct MongoDB(Database);
 impl MongoDB {
     pub(crate) async fn login(&self, info: UserCreationInfo) -> Result<User, StdError> {
-        let db_user = self.get_user(doc! { 
+        let db_user = self.get_db_user(doc! { 
             "email": info.email.clone(),
             "password": info.password.to_string(),
         }).await?;
 
         let mut friends = Vec::with_capacity(db_user.friends().len());
         for friend_uuid in db_user.friends() {
-            friends.push(User::from(self.get_user(doc! {
+            friends.push(User::from(self.get_db_user(doc! {
                 "_id": friend_uuid
             }).await?)?);
         }
@@ -67,7 +68,7 @@ impl MongoDB {
     }
 
     pub(crate) async fn sign_up(&self, info: UserCreationInfo) -> Result<User, StdError> {
-        if self.get_user(doc! { "email": info.email.clone() }).await.is_ok() {
+        if self.get_db_user(doc! { "email": info.email.clone() }).await.is_ok() {
             return Err("User already exist!".into());
         }
         else if info.tag.is_empty() || info.email.is_empty() || !info.password.is_valid() {
@@ -82,9 +83,62 @@ impl MongoDB {
         Ok(User::from(db_user)?)
     }
 
-    pub(crate) async fn get_user(&self, document: mongodb::bson::Document) -> Result<DbUser, StdError> {
+    pub(crate) async fn get_db_user(&self, document: mongodb::bson::Document) -> Result<DbUser, StdError> {
         let users = self.user_collection();
         users.find_one(document).await?.ok_or("Failed to find User!".into())
+    }
+
+    pub(crate) async fn get_striped_user(&self, document: mongodb::bson::Document) -> Result<User, StdError> {
+        self.get_db_user(document).await
+            .and_then(|db_user| User::from(db_user))
+            .map(|mut user| {
+                user.strip_info();
+                
+                user
+            })
+    }
+    
+    pub(crate) async fn query_by_tag(&self, tags: Vec<String>) -> Vec<User> {
+        let mut result = Vec::with_capacity(tags.len());
+        
+        for tag in tags {
+            if let Ok(user) = self.get_striped_user(doc! { "tag": tag }).await {
+                result.push(user);
+            }
+        }
+        
+        result
+    }
+    
+    pub(crate) async fn query_contains_tag(&self, tag: String) -> Result<Vec<User>, StdError> {
+        let users = self.user_collection();
+
+        let users = users.find(doc! {
+            "tag": { "$regex": tag, "$options": "i" } // "i" option for case-insensitive search
+        }).await?
+        .collect::<Vec<Result<DbUser, _>>>().await
+        .into_iter()
+        .filter_map(|db_user| db_user.ok())
+        .filter_map(|db_user| User::from(db_user).ok())
+        .map(|mut user| { 
+            user.strip_info();
+            user
+        })
+        .collect();
+        
+        Ok(users)
+    }
+    
+    pub(crate) async fn query_by_uuid(&self, uuids: Vec<UUID>) -> Vec<User> {
+        let mut result = Vec::with_capacity(uuids.len());
+        
+        for uuid in uuids {
+            if let Ok(user) = self.get_striped_user(doc! { "_id": uuid.to_string() }).await {
+                result.push(user);
+            }
+        }
+        
+        result
     }
 }
 // Private

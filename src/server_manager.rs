@@ -2,8 +2,8 @@ use crate::{mongo_db::{MongoDB, MongoDBClient}, user_manager::{ServerUser, UserM
 
 use futures::{SinkExt, StreamExt, TryStreamExt};
 use tokio::net::TcpListener;
-use tokio_tungstenite::accept_async;
-use yapping_core::{client_server_coms::{Response, ServerMessage, ServerMessageContent, Session}, l3gion_rust::{sllog::{error, info, warn}, StdError, UUID}};
+use tokio_tungstenite::{accept_async, tungstenite::handshake::server::create_response};
+use yapping_core::{client_server_coms::{Query, Response, ServerMessage, ServerMessageContent, Session}, l3gion_rust::{sllog::{error, info, warn}, StdError, UUID}};
 use tokio_tungstenite::tungstenite::Message as TkMessage;
 
 pub(crate) struct ServerManager {
@@ -56,6 +56,7 @@ impl ServerManager {
                                 ServerMessageContent::SESSION(session) => handle_session(&mongodb, client_message.uuid, session).await,
                                 ServerMessageContent::NOTIFICATION(notification) => todo!(),
                                 ServerMessageContent::MODIFICATION(modification) => todo!(),
+                                ServerMessageContent::QUERY(query) => handle_query(&mongodb, client_message.uuid, query).await,
                             };
 
                             if let Ok(server_message_bin) = yapping_core::bincode::serialize(&server_message) {
@@ -106,6 +107,33 @@ async fn handle_session(
                 create_response!(Response::OK_SESSION, msg_uuid, Session::TOKEN(user))
             }),
         Session::TOKEN(user) => todo!(),
+    } {
+        Ok(msg) => msg,
+        Err(e) => create_response!(Response::Err, msg_uuid, e.to_string()),
+    }
+}
+
+async fn handle_query(
+    mongo_db: &MongoDB,
+    msg_uuid: UUID,
+    query: Query,
+) -> ServerMessage {
+    match match query {
+        Query::USERS_BY_TAG(tags) => {
+            let users = mongo_db.query_by_tag(tags).await;
+            Ok(create_response!(Response::OK_QUERY, msg_uuid, Query::RESULT(users)))
+        },
+        Query::USERS_CONTAINS_TAG(tag) => mongo_db
+            .query_contains_tag(tag).await
+            .map(|users| {
+                create_response!(Response::OK_QUERY, msg_uuid, Query::RESULT(users))
+            }),
+        Query::USERS_BY_UUID(uuids) => {
+            let users = mongo_db.query_by_uuid(uuids).await;
+            Ok(create_response!(Response::OK_QUERY, msg_uuid, Query::RESULT(users)))
+        },
+
+        _ => Err(std::format!("Invalid Query! {:#?}", query).into()),
     } {
         Ok(msg) => msg,
         Err(e) => create_response!(Response::Err, msg_uuid, e.to_string()),
