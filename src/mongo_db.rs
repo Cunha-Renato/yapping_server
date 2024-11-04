@@ -4,19 +4,16 @@ use yapping_core::{l3gion_rust::StdError, user::{DbUser, User, UserCreationInfo}
 use mongodb::{Client, Database};
 use std::io::Error as IoError;
 use std::process::Command;
-use std::sync::Arc;
-use tokio::sync::Mutex;
 use tokio::task;
 
 const MONGO_DATA: &str = "mongo_db/data";
 const MONGO_LOG: &str = "mongo_db/log";
 
-pub(crate) struct MongoDB {
+pub(crate) struct MongoDBClient {
     _db_thread: tokio::task::JoinHandle<Result<ExitStatus, IoError>>,
-    mongo_client: Arc<Mutex<Client>>,
-    mongo_database: Arc<Database>,
+    mongo_client: Client,
 }
-impl MongoDB {
+impl MongoDBClient {
     pub(crate) async fn new() -> Result<Self, StdError> {
         std::fs::create_dir_all(MONGO_DATA).map_err(|_| "Failed to create MongoDB data directory!")?;
 
@@ -37,15 +34,19 @@ impl MongoDB {
         let mongo_client = Client::with_options(client_options)
             .map_err(|e| format!("Failed to create MongoDB client: {}", e))?;
         
-        let mongo_database = mongo_client.database("yapping_db");
-
         Ok(Self {
             _db_thread,
-            mongo_client: Arc::new(Mutex::new(mongo_client)),
-            mongo_database: Arc::new(mongo_database),
+            mongo_client,
         })
     }
+    
+    pub(crate) fn get_database(&self) -> MongoDB {
+        MongoDB(self.mongo_client.database("yapping_db"))
+    }
+}
 
+pub(crate) struct MongoDB(Database);
+impl MongoDB {
     pub(crate) async fn login(&self, info: UserCreationInfo) -> Result<User, StdError> {
         let db_user = self.get_user(doc! { 
             "email": info.email.clone(),
@@ -89,6 +90,6 @@ impl MongoDB {
 // Private
 impl MongoDB {
     fn user_collection(&self) -> mongodb::Collection<DbUser> {
-        self.mongo_database.collection::<DbUser>("Users")
+        self.0.collection::<DbUser>("Users")
     }
 }
