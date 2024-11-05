@@ -5,6 +5,7 @@ mod mongo_db;
 mod server_manager;
 mod user_manager;
 mod chat_manager;
+mod coms;
 
 #[tokio::main]
 async fn main() -> Result<(), StdError> {

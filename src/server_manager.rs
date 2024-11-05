@@ -1,8 +1,10 @@
-use crate::{mongo_db::{MongoDB, MongoDBClient}, user_manager::{ServerUser, UserManager, UserManagerMessage}};
+use std::sync::Arc;
+
+use crate::{coms::Coms, mongo_db::{MongoDB, MongoDBClient}, user_manager::{UserManager, UserManagerMessage}};
 
 use futures::{SinkExt, StreamExt, TryStreamExt};
-use tokio::net::TcpListener;
-use tokio_tungstenite::{accept_async, tungstenite::handshake::server::create_response};
+use tokio::{net::TcpListener, sync::Mutex};
+use tokio_tungstenite::accept_async;
 use yapping_core::{client_server_coms::{Query, Response, ServerMessage, ServerMessageContent, Session}, l3gion_rust::{sllog::{error, info, warn}, StdError, UUID}};
 use tokio_tungstenite::tungstenite::Message as TkMessage;
 
@@ -28,7 +30,7 @@ impl ServerManager {
         info!("Yapping server is now running!");
     
         while let Ok((stream, _)) = listener.accept().await {
-            let mongodb = self.mongo_db_client.get_database();
+            let mongo_db = self.mongo_db_client.get_database();
             let mut user_manager_sender = self.user_manager_sender.clone();
 
             tokio::spawn(async move {
@@ -43,31 +45,34 @@ impl ServerManager {
                 };
                 info!("Accetped connection!");
 
-                let mut user = ServerUser::new();
+                let (write, mut read) = ws_stream.split();
 
-                let (mut write, mut read) = ws_stream.split();
-                while let Some(Ok(msg)) = read.next().await {
-                    match msg {
-                        TkMessage::Binary(client_message_bin) => if let Ok(client_message) = yapping_core::bincode::deserialize::<ServerMessage>(&client_message_bin) {
-                            info!("Received: {:#?}", client_message);
-
-                            let server_message = match client_message.content {
-                                ServerMessageContent::RESPONSE(response) => todo!(),
-                                ServerMessageContent::SESSION(session) => handle_session(&mongodb, client_message.uuid, session).await,
-                                ServerMessageContent::NOTIFICATION(notification) => todo!(),
-                                ServerMessageContent::MODIFICATION(modification) => todo!(),
-                                ServerMessageContent::QUERY(query) => handle_query(&mongodb, client_message.uuid, query).await,
-                            };
-
-                            if let Ok(server_message_bin) = yapping_core::bincode::serialize(&server_message) {
-                                match write.send(TkMessage::Binary(server_message_bin)).await {
-                                    Ok(_) => warn!("Sent: {:#?}", server_message),
-                                    Err(e) => error!("Failed to send message! {e}"),
+                let coms = Arc::new(Mutex::new(Coms::new(mongo_db, write)));
+                let coms_read = Arc::clone(&coms);
+                
+                let read_taks = tokio::spawn(async move {
+                    while let Some(Ok(msg)) = read.next().await {
+                        match msg {
+                            TkMessage::Binary(msg) => {
+                                if let Err(e) = coms_read.lock().await.receive_msg(msg).await {
+                                    error!("Faield to process ServerMessage! {e}");
                                 }
                             }
-                        },
-                        _ => (),
-                    };
+                            _ => ()
+                        };
+                    }
+                });
+                
+                loop {
+                    if let Err(e) = coms.lock().await.update().await {
+                        error!("In Coms::update()! {e}");
+                    }
+                    
+                    if read_taks.is_finished() {
+                        break;
+                    }
+
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 }
                 
                 warn!("Connection taks ended!");
@@ -75,67 +80,5 @@ impl ServerManager {
         };
         
         Ok(())
-    }
-}
-
-macro_rules! create_response {
-    ($response_type:expr, $msg_uuid:expr, $content:expr) => {
-        ServerMessage::new($msg_uuid, ServerMessageContent::RESPONSE($response_type($content)))
-    };
-}
-
-macro_rules! create_empty_response {
-    ($response_type:expr, $msg_uuid:expr) => {
-        ServerMessage::new($msg_uuid, ServerMessageContent::RESPONSE($response_type(None)))
-    };
-}
-
-async fn handle_session(
-    mongo_db: &MongoDB,
-    msg_uuid: UUID,
-    session: Session,
-) -> ServerMessage {
-    match match session {
-        Session::LOGIN(info) => mongo_db
-            .login(info).await
-            .map(|user| {
-                create_response!(Response::OK_SESSION, msg_uuid, Session::TOKEN(user))
-            }),
-        Session::SIGN_UP(info) => mongo_db
-            .login(info).await
-            .map(|user| {
-                create_response!(Response::OK_SESSION, msg_uuid, Session::TOKEN(user))
-            }),
-        Session::TOKEN(user) => todo!(),
-    } {
-        Ok(msg) => msg,
-        Err(e) => create_response!(Response::Err, msg_uuid, e.to_string()),
-    }
-}
-
-async fn handle_query(
-    mongo_db: &MongoDB,
-    msg_uuid: UUID,
-    query: Query,
-) -> ServerMessage {
-    match match query {
-        Query::USERS_BY_TAG(tags) => {
-            let users = mongo_db.query_by_tag(tags).await;
-            Ok(create_response!(Response::OK_QUERY, msg_uuid, Query::RESULT(users)))
-        },
-        Query::USERS_CONTAINS_TAG(tag) => mongo_db
-            .query_contains_tag(tag).await
-            .map(|users| {
-                create_response!(Response::OK_QUERY, msg_uuid, Query::RESULT(users))
-            }),
-        Query::USERS_BY_UUID(uuids) => {
-            let users = mongo_db.query_by_uuid(uuids).await;
-            Ok(create_response!(Response::OK_QUERY, msg_uuid, Query::RESULT(users)))
-        },
-
-        _ => Err(std::format!("Invalid Query! {:#?}", query).into()),
-    } {
-        Ok(msg) => msg,
-        Err(e) => create_response!(Response::Err, msg_uuid, e.to_string()),
     }
 }
