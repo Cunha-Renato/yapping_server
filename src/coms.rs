@@ -93,7 +93,7 @@ impl Coms {
                     create_response!(Response::OK_SESSION, msg_uuid, Session::TOKEN(user))
                 }),
             Session::SIGN_UP(info) => self.mongo_db
-                .login(info).await
+                .sign_up(info).await
                 .map(|user| {
                     create_response!(Response::OK_SESSION, msg_uuid, Session::TOKEN(user))
                 }),
