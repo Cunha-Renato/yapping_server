@@ -3,7 +3,7 @@ use yapping_core::l3gion_rust::StdError;
 
 mod mongo_db;
 mod server_manager;
-mod user_manager;
+mod notification_manager;
 mod chat_manager;
 mod coms;
 

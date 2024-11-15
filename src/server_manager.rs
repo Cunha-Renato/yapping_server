@@ -1,27 +1,26 @@
 use std::sync::Arc;
 
-use crate::{coms::Coms, mongo_db::{MongoDB, MongoDBClient}, user_manager::{UserManager, UserManagerMessage}};
-
-use futures::{SinkExt, StreamExt, TryStreamExt};
-use tokio::{net::TcpListener, sync::Mutex};
+use futures::StreamExt;
+use tokio::{net::TcpListener, sync::{mpsc::Sender, Mutex}};
 use tokio_tungstenite::accept_async;
-use yapping_core::{client_server_coms::{Query, Response, ServerMessage, ServerMessageContent, Session}, l3gion_rust::{sllog::{error, info, warn}, StdError, UUID}};
+use yapping_core::l3gion_rust::{sllog::{error, info, warn}, StdError, UUID};
 use tokio_tungstenite::tungstenite::Message as TkMessage;
+
+use crate::{coms::Coms, mongo_db::MongoDBClient, notification_manager::{NotificationManager, NotificationManagerMessage}};
 
 pub(crate) struct ServerManager {
     mongo_db_client: MongoDBClient,
-    user_manager_sender: std::sync::mpsc::Sender<UserManagerMessage>,
+    users_manager_sender: Sender<(UUID, NotificationManagerMessage)>,
 }
 impl ServerManager {
     pub(crate) async fn new() -> Result<Self, StdError> {
-        let user_manager = UserManager::new();
-        let user_manager_sender = user_manager.sender();
-
-        user_manager.start_recv();
+        let um = NotificationManager::new();
+        let us = um.sender();
+        um.start_recv();
 
         Ok(Self {
             mongo_db_client: MongoDBClient::new().await?,
-            user_manager_sender,
+            users_manager_sender: us,
         })
     }
 
@@ -31,7 +30,7 @@ impl ServerManager {
     
         while let Ok((stream, _)) = listener.accept().await {
             let mongo_db = self.mongo_db_client.get_database();
-            let mut user_manager_sender = self.user_manager_sender.clone();
+            let users_manager_sender = self.users_manager_sender.clone();
 
             tokio::spawn(async move {
                 info!("New connection task spawned!");
@@ -47,7 +46,11 @@ impl ServerManager {
 
                 let (write, mut read) = ws_stream.split();
 
-                let coms = Arc::new(Mutex::new(Coms::new(mongo_db, write)));
+                let coms = Arc::new(Mutex::new(Coms::new(
+                    mongo_db, 
+                    users_manager_sender,
+                    write,
+                )));
                 let coms_read = Arc::clone(&coms);
                 
                 let read_taks = tokio::spawn(async move {
@@ -55,7 +58,7 @@ impl ServerManager {
                         match msg {
                             TkMessage::Binary(msg) => {
                                 if let Err(e) = coms_read.lock().await.receive_msg(msg).await {
-                                    error!("Faield to process ServerMessage! {e}");
+                                    error!("In Coms::receive_msg: {e}");
                                 }
                             }
                             _ => ()
@@ -75,6 +78,9 @@ impl ServerManager {
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 }
                 
+                if let Err(e) = coms.lock().await.shutdown().await {
+                    error!("In Coms::shutdown: {e}");
+                }
                 warn!("Connection taks ended!");
             });
         };

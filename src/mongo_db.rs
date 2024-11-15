@@ -1,6 +1,6 @@
 use std::process::ExitStatus;
 use mongodb::bson::doc;
-use yapping_core::{l3gion_rust::{StdError, UUID}, user::{DbUser, User, UserCreationInfo}};
+use yapping_core::{client_server_coms::{DbNotification, Notification}, l3gion_rust::{StdError, UUID}, user::{DbUser, User, UserCreationInfo}};
 use futures::StreamExt;
 use mongodb::{Client, Database};
 use std::io::Error as IoError;
@@ -46,6 +46,7 @@ impl MongoDBClient {
     }
 }
 
+#[derive(Debug, Clone)]
 pub(crate) struct MongoDB(Database);
 impl MongoDB {
     pub(crate) async fn login(&self, info: UserCreationInfo) -> Result<User, StdError> {
@@ -83,19 +84,58 @@ impl MongoDB {
         Ok(User::from(db_user)?)
     }
 
-    pub(crate) async fn get_db_user(&self, document: mongodb::bson::Document) -> Result<DbUser, StdError> {
-        let users = self.user_collection();
-        users.find_one(document).await?.ok_or("Failed to find User!".into())
+    pub(crate) async fn get_full_user(&self, user_uuid: UUID) -> Result<User, StdError> {
+        let db_user = self.get_db_user(doc! { "_id": user_uuid.to_string() }).await?;
+        
+        let mut friends = Vec::with_capacity(db_user.friends().len());
+        for friend_uuid in db_user.friends() {
+            friends.push(User::from(self.get_db_user(doc! {
+                "_id": friend_uuid
+            }).await?)?);
+        }
+
+        let mut user = User::from(db_user)?;
+        user.set_friends(friends);
+        
+        Ok(user)
     }
 
-    pub(crate) async fn get_striped_user(&self, document: mongodb::bson::Document) -> Result<User, StdError> {
-        self.get_db_user(document).await
-            .and_then(|db_user| User::from(db_user))
-            .map(|mut user| {
-                user.strip_info();
-                
-                user
+    pub(crate) async fn insert_friend(&self, user: UUID, friend: UUID) -> Result<mongodb::results::UpdateResult, mongodb::error::Error> {
+        self.user_collection()
+        .update_one(doc! { "_id": user.to_string() }, doc! { "$addToSet": { "friends": friend.to_string() } } ).await
+    }
+
+    pub(crate) async fn insert_notification(&self, user: UUID, notification: &Notification) -> Result<mongodb::results::InsertOneResult, mongodb::error::Error> {
+        let db_notification = DbNotification::new(user, notification);
+        
+        self.notification_collection().insert_one(db_notification).await
+    }
+
+    pub(crate) async fn get_user_notifications(&self, user_uuid: UUID) -> Result<Vec<Notification>, StdError> {
+        let notifications = self.notification_collection().find(doc! { "user": user_uuid.to_string() }).await?
+            .collect::<Vec<Result<DbNotification, _>>>().await
+            .into_iter()
+            .filter_map(|db_n| db_n.ok())
+            .filter_map(|db_n| Notification::from(db_n).ok())
+            .collect();
+        
+        Ok(notifications)
+    }
+    
+    pub(crate) async fn get_user_friend_requests(&self, user_uuid: UUID) -> Result<Vec<Notification>, StdError> {
+        let fr = self.get_user_notifications(user_uuid).await?
+            .into_iter()
+            .filter(|nt| match nt.notification_type {
+                yapping_core::client_server_coms::NotificationType::FRIEND_REQUEST(_, _) => true,
+                _ => false,
             })
+            .collect();
+            
+        Ok(fr)
+    }
+
+    pub(crate) async fn remove_notification(&self, notification_uuid: UUID) -> Result<mongodb::results::DeleteResult, mongodb::error::Error> {
+        self.notification_collection().delete_one(doc! { "_id": notification_uuid.to_string() }).await
     }
     
     pub(crate) async fn query_by_tag(&self, tags: Vec<String>) -> Vec<User> {
@@ -143,7 +183,26 @@ impl MongoDB {
 }
 // Private
 impl MongoDB {
+    async fn get_striped_user(&self, document: mongodb::bson::Document) -> Result<User, StdError> {
+        self.get_db_user(document).await
+            .and_then(|db_user| User::from(db_user))
+            .map(|mut user| {
+                user.strip_info();
+                
+                user
+            })
+    }
+
+    async fn get_db_user(&self, document: mongodb::bson::Document) -> Result<DbUser, StdError> {
+        let users = self.user_collection();
+        users.find_one(document).await?.ok_or("Failed to find User!".into())
+    }
+    
     fn user_collection(&self) -> mongodb::Collection<DbUser> {
         self.0.collection::<DbUser>("Users")
+    }
+
+    fn notification_collection(&self) -> mongodb::Collection<DbNotification> {
+        self.0.collection::<DbNotification>("Notifications")
     }
 }
