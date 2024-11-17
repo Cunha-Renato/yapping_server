@@ -1,6 +1,6 @@
-use std::process::ExitStatus;
+use std::{future::IntoFuture, process::ExitStatus};
 use mongodb::bson::doc;
-use yapping_core::{client_server_coms::{DbNotification, Notification}, l3gion_rust::{StdError, UUID}, user::{DbUser, User, UserCreationInfo}};
+use yapping_core::{chat::{Chat, DbChat}, client_server_coms::{DbNotification, Notification}, l3gion_rust::{rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator}, StdError, UUID}, message::{DbMessage, Message}, user::{DbUser, User, UserCreationInfo}};
 use futures::StreamExt;
 use mongodb::{Client, Database};
 use std::io::Error as IoError;
@@ -105,16 +105,36 @@ impl MongoDB {
         .update_one(doc! { "_id": user.to_string() }, doc! { "$addToSet": { "friends": friend.to_string() } } ).await
     }
 
-    pub(crate) async fn insert_notification(&self, user: UUID, notification: &Notification) -> Result<mongodb::results::InsertOneResult, mongodb::error::Error> {
+    pub(crate) async fn insert_notification(&self, user: UUID, notification: &Notification) -> Result<(), StdError> {
         let db_notification = DbNotification::new(user, notification);
-        
-        self.notification_collection().insert_one(db_notification).await
+        self.notification_collection().insert_one(db_notification).await?;
+
+        Ok(())
     }
 
-    pub(crate) async fn get_user_notifications(&self, user_uuid: UUID) -> Result<Vec<Notification>, StdError> {
+    pub(crate) async fn insert_non_duplicant_notification(&self, user: UUID, notification: &Notification) -> Result<bool, StdError> {
+        if let Some(existing) = self.get_user_notifications(user).await?
+            .par_iter()
+            .find_any(|n| n.notification_type == notification.notification_type)
+        {
+            self.notification_collection().update_one(
+                doc! { "_id": existing.uuid().to_string() },
+                doc! { "$set": { "_id": notification.uuid().to_string() } },
+            ).await?;
+
+            Ok(true)
+        }
+        else {
+            self.insert_notification(user, notification).await?;
+
+            Ok(false)
+        }
+    }
+
+    pub(crate) async fn get_user_notifications(&self, user_uuid: UUID) -> mongodb::error::Result<Vec<Notification>> {
         let notifications = self.notification_collection().find(doc! { "user": user_uuid.to_string() }).await?
             .collect::<Vec<Result<DbNotification, _>>>().await
-            .into_iter()
+            .into_par_iter()
             .filter_map(|db_n| db_n.ok())
             .filter_map(|db_n| Notification::from(db_n).ok())
             .collect();
@@ -138,6 +158,40 @@ impl MongoDB {
         self.notification_collection().delete_one(doc! { "_id": notification_uuid.to_string() }).await
     }
     
+    pub(crate) async fn new_chat(&self, chat: &Chat) -> Result<(), StdError> {
+        let db_chat = DbChat::new(chat.uuid(), chat.tag(), chat.users());
+        if self.chat_collection().find_one(doc! { "users": { "$all": db_chat.users() } }).await?.is_none() {
+            self.chat_collection().insert_one(db_chat).await?;
+            return Ok(())
+        }
+        
+        Err("Chat alwready exists!".into())
+    }
+    
+    pub(crate) async fn get_chat(&self, chat_uuid: UUID) -> Result<Chat, StdError> {
+        Chat::from(self.chat_collection().find_one(doc! { "_id": chat_uuid.to_string() }).await?.ok_or("In MongoDB::get_chat: Failed to find Chat!")?)
+    }
+
+    pub(crate) async fn get_user_chats(&self, user_uuid: UUID) -> Result<Vec<Chat>, StdError> {
+        let chats = self.chat_collection()
+            .find(doc! { "users": user_uuid.to_string() })
+            .await?
+            .collect::<Vec<Result<DbChat, _>>>().await
+            .into_par_iter()
+            .filter_map(|db_c| db_c.ok())
+            .filter_map(|db_c| Chat::from(db_c).ok())
+            .collect();
+        
+        Ok(chats)
+    }
+
+    pub(crate) async fn insert_message(&self, chat_uuid: UUID, message: Message) -> Result<(), StdError> {
+        let doc_db_message = mongodb::bson::to_bson(&DbMessage::from(message))?;
+        self.chat_collection().update_one(doc! { "_id": chat_uuid.to_string() }, doc! { "$addToSet": { "messages": doc_db_message } }).await?;
+        
+        Ok(())
+    }
+
     pub(crate) async fn query_by_tag(&self, tags: Vec<String>) -> Vec<User> {
         let mut result = Vec::with_capacity(tags.len());
         
@@ -204,5 +258,9 @@ impl MongoDB {
 
     fn notification_collection(&self) -> mongodb::Collection<DbNotification> {
         self.0.collection::<DbNotification>("Notifications")
+    }
+    
+    fn chat_collection(&self) -> mongodb::Collection<DbChat> {
+        self.0.collection::<DbChat>("Chats")
     }
 }

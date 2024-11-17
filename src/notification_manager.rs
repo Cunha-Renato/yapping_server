@@ -7,7 +7,7 @@ use yapping_core::{client_server_coms::{Notification, NotificationType}, l3gion_
 
 #[allow(non_camel_case_types)]
 pub(crate) enum NotificationManagerMessage {
-    NOTIFY_USER(UUID, Sender<Notification>),
+    NOTIFY_USER(UUID, Vec<UUID>, Sender<Notification>),
     USER_OFFLINE,
     CLIENT_MESSAGE(Notification),
 }
@@ -17,6 +17,8 @@ pub(crate) struct NotificationManager {
     receiver: Receiver<(UUID, NotificationManagerMessage)>,
     
     users: HashMap<UUID, Sender<Notification>>,
+    chat_users: HashMap<UUID, Vec<tokio::sync::broadcast::Receiver<Notification>>>,
+
     chat_manager: ChatManager,
 }
 impl NotificationManager {
@@ -27,6 +29,7 @@ impl NotificationManager {
             sender,
             receiver,
             users: HashMap::default(),
+            chat_users: HashMap::default(),
             chat_manager: ChatManager::default(),
         }
     }
@@ -42,33 +45,72 @@ impl NotificationManager {
             loop {
                 while let Ok((sender_uuid, msg)) = self.receiver.try_recv() {
                     match msg {
-                        NotificationManagerMessage::NOTIFY_USER(user_uuid, user_notification) => {
+                        NotificationManagerMessage::NOTIFY_USER(user_uuid, user_chats, user_notification) => {
                             self.users.insert(user_uuid, user_notification);
+                            
+                            for chat in user_chats {
+                                self.chat_manager.new_chat(chat);
+                                if let Some(receiver) = self.chat_manager.subscribe(chat) {
+                                    self.chat_users.entry(user_uuid).or_insert(vec![])
+                                        .push(receiver);
+                                }
+                            }
                         },
-                        
+
                         NotificationManagerMessage::USER_OFFLINE => {
                             self.users.remove(&sender_uuid);
+                            self.chat_users.remove(&sender_uuid);
                         }
 
                         NotificationManagerMessage::CLIENT_MESSAGE(notification) => {
                             match notification.notification_type().clone() {
-                                NotificationType::MESSAGE(chat_uuid, message) => todo!(),
-                                NotificationType::MESSAGE_READ(_) => todo!(),
-                                NotificationType::NEW_CHAT(chat) => todo!(),
-
+                                NotificationType::NEW_CHAT(chat) => {
+                                    self.chat_manager.new_chat(chat.uuid());
+                                    
+                                    for u in chat.users() {
+                                        if let Some(user_sender) = self.users.get(u) {
+                                            if let Some(receiver) = self.chat_manager.subscribe(chat.uuid()) {
+                                                self.chat_users.entry(*u).or_insert(vec![])
+                                                    .push(receiver);
+                                                
+                                                if let Err(e) = user_sender.send(Notification::new(NotificationType::NEW_CHAT(chat.clone()))).await {
+                                                    error!("In NotificationManager::start_recv::NEW_CHAT: {e}")
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                NotificationType::NEW_MESSAGE(chat_uuid, _) => self.chat_manager.post(chat_uuid, notification),
                                 NotificationType::FRIEND_REQUEST(_, receiver) 
                                 | NotificationType::FRIEND_ACCEPTED(_, receiver)=> {
                                     if let Some(receiving_user_sender) = self.users.get(&receiver) {
                                         if let Err(e) = receiving_user_sender.send(notification).await {
-                                            error!("{e}");
+                                            error!("In NotificationManagerMessage::start_recv::FRIEND_ACCEPTED: {e}");
                                         }
                                     }
                                 },
+                                _ => (),
                         }
                     }};
                 }
             
-                // TODO: Update ChatManager
+                // Bad? Yep bad. Slow? Very.
+                for (chat_user, receivers) in &mut self.chat_users {
+                    if let Some(sender) = self.users.get_mut(chat_user) {
+                        for receiver in receivers {
+                            while let Ok(notification) = receiver.try_recv() {
+                                match notification.notification_type {
+                                    NotificationType::NEW_MESSAGE(chat_uuid, msg) => if let Err(e) = sender
+                                       .send(Notification::new(NotificationType::NEW_MESSAGE(chat_uuid, msg))).await 
+                                    {
+                                        error!("In NotificationManager::start_recv: {e}");
+                                    }
+                                    _ => error!("In NotificationManager::ChatManager update: Wrong NotificationType!"),
+                                }
+                            }
+                        }
+                    }
+                }
             }
         });
     }

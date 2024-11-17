@@ -48,6 +48,7 @@ impl Coms {
         self.manager.update();
 
         for msg in self.manager.to_retry() {
+            warn!("Sending to_retry: {:?}", msg);
             self.send_msg(Some(msg)).await?;
         }
     
@@ -103,7 +104,10 @@ impl Coms {
         let bin_msg = TkMessage::Binary(serialize(&msg)?);
         self.write.send(bin_msg).await?;
 
+        let current_user = self.mongo_db.get_full_user(self.user_uuid).await?;
+        warn!("Sent to: {}", current_user.tag());
         warn!("Sent: {:#?}", msg);
+
 
         self.manager.sent(msg);
 
@@ -129,9 +133,13 @@ impl Coms {
         };
         
         self.user_uuid = user_uuid;
+        let user_chats = if let Ok(chats) = self.mongo_db.get_user_chats(self.user_uuid).await {
+            chats.iter().map(|c| c.uuid()).collect()
+        } else { vec![] };
+
         if let Err(e) = self.notification_manager_sender.send((
             self.user_uuid,
-            NotificationManagerMessage::NOTIFY_USER(self.user_uuid, self.notification_sender.clone())
+            NotificationManagerMessage::NOTIFY_USER(self.user_uuid, user_chats, self.notification_sender.clone())
         )).await {
             error!("In Coms::handle_session: {e}");
         }
@@ -164,6 +172,28 @@ impl Coms {
                 self.mongo_db.get_user_friend_requests(self.user_uuid).await
                     .map(|notifications| create_response!(Response::OK_QUERY, msg_uuid, Query::RESULT_FRIEND_REQUESTS(notifications)))
             }
+            Query::USER_CHATS => {
+                self.mongo_db.get_user_chats(self.user_uuid).await
+                    .map(|chats| {
+                        if self.user_uuid.is_valid() {
+                            create_response!(Response::OK_QUERY, msg_uuid, Query::RESULT_CHATS(chats))
+                        }
+                        else {
+                            create_response!(Response::Err, msg_uuid, "User is invalid!".to_string())
+                        }                        
+                    })
+            },
+            Query::CHAT_MESSAGES(chat_uuid) => {
+                self.mongo_db.get_chat(chat_uuid).await
+                    .map(|chat| {
+                        if chat.users().contains(&self.user_uuid) && self.user_uuid.is_valid() {
+                            create_response!(Response::OK_QUERY, msg_uuid, Query::RESULT_CHAT_MESSAGES(chat.messages().to_vec()))
+                        }
+                        else {
+                            create_response!(Response::Err, msg_uuid, "User is invalid or is not a member of the chat!".to_string())
+                        }
+                })
+            }
     
             _ => Err(std::format!("Invalid Query! {:#?}", query).into()),
         } {
@@ -173,20 +203,65 @@ impl Coms {
     }
     
     async fn handle_notification(&mut self, msg_uuid: UUID, notification: Notification) -> Result<ServerMessage, StdError> {
-        /*
-            ADD notification to the users database,
-            SEND notification to users,
-            HANDLE response from users,
-        */
-
         if !self.is_user_valid() { return Err("User is not logged in, Server can't respond to notifications!".into()); }
 
         // Handling the database
-        match notification.notification_type {
+        match notification.notification_type.clone() {
+            NotificationType::NEW_CHAT(chat) => {
+                // This is going to be shit.
+                if self.user_uuid.is_valid() {
+                    let mut members_are_friends = true;
+
+                    let _ = self.mongo_db.get_full_user(self.user_uuid).await?
+                        .friends()
+                        .iter()
+                        .map_while(|f| {
+                            if !chat.users().contains(&f.uuid()) {
+                                members_are_friends = false;
+                                return None;
+                            }
+                            
+                            Some(())
+                        });
+
+                    if chat.users().contains(&self.user_uuid) && members_are_friends {
+                        if let Err(e) = self.mongo_db.new_chat(&chat).await {
+                            return Ok(ServerMessage::new(msg_uuid, ServerMessageContent::RESPONSE(Response::Err(e.to_string()))));
+                        }
+                    }
+                }
+            },
+            NotificationType::NEW_MESSAGE(chat_uuid, message) => {
+                // Creating the notifications for all.
+                let chat = self.mongo_db.get_chat(chat_uuid).await?;
+                if self.user_uuid.is_valid() && chat.users().contains(&self.user_uuid) {
+                    for u in chat.users() {
+                        if *u != self.user_uuid {
+                            self.mongo_db.insert_notification(*u, &Notification::new(NotificationType::MESSAGE(chat_uuid))).await?;
+                            self.mongo_db.insert_message(chat.uuid(), message.clone()).await?;
+                        }
+                    }
+                }
+            }
+            NotificationType::MESSAGE_READ(chat_uuid) => {
+                if self.user_uuid.is_valid() {
+                    for notification in self.mongo_db.get_user_notifications(self.user_uuid).await? {
+                        match notification.notification_type {
+                            NotificationType::MESSAGE(notification_chat_uuid) => if chat_uuid == notification_chat_uuid {
+                                if let Err(e) = self.mongo_db.remove_notification(notification.uuid()).await {
+                                    error!("In Coms::handle_notification: {e}");
+                                }
+                            },
+                            _ => (),
+                        }
+                    }
+                }
+                else { error!("In Coms::handle_notification: User is not in Chat or User is invalid!"); }
+            }
             NotificationType::FRIEND_REQUEST(sender, receiver) => {
                 if self.user_uuid == sender {
                     // Saving the notification in the database.
-                    self.mongo_db.insert_notification(receiver, &notification).await?;
+                    self.mongo_db.insert_non_duplicant_notification(receiver, &notification).await?;
                 }
             },
             NotificationType::FRIEND_ACCEPTED(sender, receiver) => {
