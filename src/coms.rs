@@ -1,7 +1,7 @@
 use futures::{stream::SplitSink, SinkExt};
 use tokio::{net::TcpStream, sync::mpsc::{Receiver, Sender}};
 use tokio_tungstenite::WebSocketStream;
-use yapping_core::{client_server_coms::{ComsManager, Notification, NotificationType, Query, Response, ServerMessage, ServerMessageContent, Session}, l3gion_rust::{sllog::{error, info, warn}, StdError, UUID}};
+use yapping_core::{client_server_coms::{ComsManager, Modification, Notification, NotificationType, Query, Response, ServerMessage, ServerMessageContent, Session}, l3gion_rust::{sllog::{error, info, warn}, StdError, UUID}};
 use tokio_tungstenite::tungstenite::Message as TkMessage;
 use crate::{mongo_db::MongoDB, notification_manager::NotificationManagerMessage};
 
@@ -54,7 +54,8 @@ impl Coms {
     
         while let Ok(notification) = self.notification_receiver.try_recv() {
             match &notification.notification_type {
-                NotificationType::FRIEND_ACCEPTED(_, _) => self.re_send_user().await?,
+                NotificationType::RESEND_USER(_)
+                | NotificationType::FRIEND_ACCEPTED(_, _) => self.re_send_user().await?,
                 _ => self.send_msg(Some(ServerMessage::from(ServerMessageContent::NOTIFICATION(notification)))).await?,
 
             };
@@ -88,7 +89,7 @@ impl Coms {
             let response_msg = match msg.content {
                 ServerMessageContent::SESSION(session) => Some(self.handle_session(msg.uuid, session).await),
                 ServerMessageContent::NOTIFICATION(notification) => Some(self.handle_notification(msg.uuid, notification).await?),
-                ServerMessageContent::MODIFICATION(_) => todo!(),
+                ServerMessageContent::MODIFICATION(modification) => Some(self.handle_modification(msg.uuid, modification).await?),
                 ServerMessageContent::QUERY(query) => Some(self.handle_query(msg.uuid, query).await),
                 _ => None,
             };
@@ -174,6 +175,7 @@ impl Coms {
             }
             Query::USER_CHATS => {
                 self.mongo_db.get_user_chats(self.user_uuid).await
+                    .map_err(|e| e.into())
                     .map(|chats| {
                         if self.user_uuid.is_valid() {
                             create_response!(Response::OK_QUERY, msg_uuid, Query::RESULT_CHATS(chats))
@@ -287,6 +289,32 @@ impl Coms {
             error!("In Coms::handle_notification: {e}");
         }
         
+        Ok(ServerMessage::new(msg_uuid, ServerMessageContent::RESPONSE(Response::OK)))
+    }
+
+    async fn handle_modification(&mut self, msg_uuid: UUID, modification: Modification) -> Result<ServerMessage, StdError> {
+        match modification {
+            Modification::REMOVE_FRIEND(friend_uuid) => if self.user_uuid.is_valid() {
+                self.mongo_db.remove_friend(self.user_uuid, friend_uuid).await?;
+                self.mongo_db.remove_friend(friend_uuid, self.user_uuid).await?;
+
+                for chat in self.mongo_db.get_user_chats(self.user_uuid).await? {
+                    if chat.users().contains(&friend_uuid) {
+                        self.mongo_db.remove_chat(chat.uuid()).await?;
+                    }
+                }
+                self.re_send_user().await?;
+
+                if let Err(e) = self.notification_manager_sender.send((
+                    self.user_uuid,
+                    NotificationManagerMessage::CLIENT_MESSAGE(Notification::new(NotificationType::RESEND_USER(friend_uuid)))
+                )).await {
+                    error!("In Coms::handle_modification: {e}");
+                }
+            },
+            _ => todo!()
+        }
+
         Ok(ServerMessage::new(msg_uuid, ServerMessageContent::RESPONSE(Response::OK)))
     }
 

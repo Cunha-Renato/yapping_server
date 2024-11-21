@@ -105,6 +105,11 @@ impl MongoDB {
         .update_one(doc! { "_id": user.to_string() }, doc! { "$addToSet": { "friends": friend.to_string() } } ).await
     }
 
+    pub(crate) async fn remove_friend(&self, user: UUID, friend: UUID) -> Result<mongodb::results::UpdateResult, mongodb::error::Error> {
+        self.user_collection()
+            .update_one(doc! { "_id": user.to_string() }, doc! { "$pull": { "friends": friend.to_string() }}).await
+    }
+
     pub(crate) async fn insert_notification(&self, user: UUID, notification: &Notification) -> Result<(), StdError> {
         let db_notification = DbNotification::new(user, notification);
         self.notification_collection().insert_one(db_notification).await?;
@@ -168,14 +173,18 @@ impl MongoDB {
         Err("Chat alwready exists!".into())
     }
     
+    pub(crate) async fn remove_chat(&self, chat_uuid: UUID) -> Result<mongodb::results::DeleteResult, mongodb::error::Error> {
+        self.chat_collection()
+            .delete_one(doc! { "_id": chat_uuid.to_string()}).await
+    }
+
     pub(crate) async fn get_chat(&self, chat_uuid: UUID) -> Result<Chat, StdError> {
         Chat::from(self.chat_collection().find_one(doc! { "_id": chat_uuid.to_string() }).await?.ok_or("In MongoDB::get_chat: Failed to find Chat!")?)
     }
 
-    pub(crate) async fn get_user_chats(&self, user_uuid: UUID) -> Result<Vec<Chat>, StdError> {
+    pub(crate) async fn get_user_chats(&self, user_uuid: UUID) -> mongodb::error::Result<Vec<Chat>> {
         let chats = self.chat_collection()
-            .find(doc! { "users": user_uuid.to_string() })
-            .await?
+            .find(doc! { "users": user_uuid.to_string() }).await?
             .collect::<Vec<Result<DbChat, _>>>().await
             .into_par_iter()
             .filter_map(|db_c| db_c.ok())
