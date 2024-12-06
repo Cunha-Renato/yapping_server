@@ -100,6 +100,14 @@ impl MongoDB {
         Ok(user)
     }
 
+    pub(crate) async fn change_user_tag(&self, user: UUID, tag: String) -> Result<(), StdError> {
+        self.user_collection().find_one_and_update(doc! { "_id": user.to_string() }, doc! { "$set": { "tag": tag} })
+            .await
+            .map_err(|e| e.to_string())?;
+        
+        Ok(())
+    }
+
     pub(crate) async fn insert_friend(&self, user: UUID, friend: UUID) -> Result<mongodb::results::UpdateResult, mongodb::error::Error> {
         self.user_collection()
         .update_one(doc! { "_id": user.to_string() }, doc! { "$addToSet": { "friends": friend.to_string() } } ).await

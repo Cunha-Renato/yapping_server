@@ -312,6 +312,17 @@ impl Coms {
                     error!("In Coms::handle_modification: {e}");
                 }
             },
+            Modification::USER_TAG(user_uuid, new_tag) => {
+                if self.user_uuid == user_uuid {
+                    self.mongo_db.change_user_tag(user_uuid, new_tag).await?;
+                    let user = self.mongo_db.get_full_user(user_uuid).await?;
+                    self.re_send_user().await?;
+
+                    for friend in user.friends() {
+                        self.notification_manager_sender.send((self.user_uuid, NotificationManagerMessage::REFRESH_USER(friend.uuid()))).await?;
+                    }
+                }
+            }
             _ => todo!()
         }
 

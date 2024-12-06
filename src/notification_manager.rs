@@ -8,6 +8,7 @@ use yapping_core::{client_server_coms::{Notification, NotificationType}, l3gion_
 #[allow(non_camel_case_types)]
 pub(crate) enum NotificationManagerMessage {
     NOTIFY_USER(UUID, Vec<UUID>, Sender<Notification>),
+    REFRESH_USER(UUID),
     USER_OFFLINE,
     CLIENT_MESSAGE(Notification),
 }
@@ -56,7 +57,13 @@ impl NotificationManager {
                                 }
                             }
                         },
-
+                        NotificationManagerMessage::REFRESH_USER(user_uuid) => {
+                            if let Some(user_sender) = self.users.get(&user_uuid) {
+                                if let Err(e) = user_sender.send(Notification::new(NotificationType::RESEND_USER(UUID::default()))).await {
+                                    error!("In NotificationManager::start_recv::REFRESH_USER: {e}");
+                                }
+                            }
+                        }
                         NotificationManagerMessage::USER_OFFLINE => {
                             self.users.remove(&sender_uuid);
                             self.chat_users.remove(&sender_uuid);
